@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Pomodoro</title>
+<style>
+  :root { --fg:#111; --bg:#fff; --muted:#8b8b8b; --accent:#111; }
+  @media (prefers-color-scheme: dark) {
+    :root { --fg:#eaeaea; --bg:#121212; --muted:#9a9a9a; --accent:#eaeaea; }
+  }
+  html, body { height:100%; margin:0; background:var(--bg); color:var(--fg); font:16px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, "Helvetica Neue", Arial, sans-serif; }
+  .wrap { max-width:520px; margin:8vh auto; padding:24px; }
+  h1 { margin:0 0 6px; font-size:20px; font-weight:600; }
+  .timer { font-variant-numeric: tabular-nums; letter-spacing:1px; font-size:80px; text-align:center; margin:22px 0; }
+  .mode { display:flex; gap:8px; justify-content:center; margin-bottom:12px; flex-wrap:wrap; }
+  .mode button { border:1px solid var(--muted); background:transparent; color:var(--fg); padding:6px 10px; border-radius:10px; cursor:pointer; }
+  .mode button.active { border-color:var(--accent); }
+  .controls { display:flex; gap:10px; justify-content:center; margin:6px 0 18px; }
+  .controls button { border:1px solid var(--fg); background:transparent; color:var(--fg); padding:10px 14px; border-radius:12px; cursor:pointer; min-width:100px; }
+  .grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; margin-top:6px; }
+  .field { border:1px solid var(--muted); border-radius:10px; padding:10px; }
+  .field label { display:block; font-size:12px; color:var(--muted); margin-bottom:6px; }
+  .field input[type=number] { width:100%; font-size:16px; background:transparent; color:var(--fg); border:1px solid var(--muted); border-radius:8px; padding:6px 8px; }
+  .row { display:flex; align-items:center; justify-content:space-between; gap:10px; margin-top:10px; }
+  .row label { font-size:14px; color:var(--muted); }
+  .small { color:var(--muted); font-size:12px; text-align:center; margin-top:14px; }
+  .hidden { display:none !important; }
+  .pill { display:inline-block; padding:2px 8px; border:1px solid var(--muted); border-radius:999px; font-size:12px; color:var(--muted); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Pomodoro <span id="cycle" class="pill">#1 • Work</span></h1>
+
+  <div class="mode" id="modeBtns">
+    <button data-mode="work" class="active">Work</button>
+    <button data-mode="short">Short Break</button>
+    <button data-mode="long">Long Break</button>
+  </div>
+
+  <div id="display" class="timer">25:00</div>
+
+  <div class="controls">
+    <button id="startPauseBtn">Start</button>
+    <button id="resetBtn">Reset</button>
+  </div>
+
+  <div class="grid">
+    <div class="field">
+      <label for="workMins">Work (min)</label>
+      <input id="workMins" type="number" min="1" max="120" value="25" />
+    </div>
+    <div class="field">
+      <label for="shortMins">Short Break (min)</label>
+      <input id="shortMins" type="number" min="1" max="60" value="5" />
+    </div>
+    <div class="field">
+      <label for="longMins">Long Break (min)</label>
+      <input id="longMins" type="number" min="1" max="60" value="15" />
+    </div>
+  </div>
+
+  <div class="row">
+    <label><input id="autoCycle" type="checkbox" checked /> Auto-cycle (Work → Short ×3 → Long)</label>
+    <label><input id="notify" type="checkbox" /> Desktop notification</label>
+    <label><input id="beep" type="checkbox" checked /> Beep on finish</label>
+  </div>
+
+  <div class="small">Space = Start/Pause • R = Reset • 1/2/3 = Work/Short/Long</div>
+</div>
+
+<script>
+(() => {
+  const display = document.getElementById('display');
+  const startPauseBtn = document.getElementById('startPauseBtn');
+  const resetBtn = document.getElementById('resetBtn');
+  const workMins = document.getElementById('workMins');
+  const shortMins = document.getElementById('shortMins');
+  const longMins = document.getElementById('longMins');
+  const autoCycle = document.getElementById('autoCycle');
+  const notify = document.getElementById('notify');
+  const beep = document.getElementById('beep');
+  const modeBtns = document.getElementById('modeBtns');
+  const cycleTag = document.getElementById('cycle');
+
+  let mode = 'work';          // 'work' | 'short' | 'long'
+  let running = false;
+  let endAt = null;           // timestamp when current phase ends
+  let remaining = 0;          // ms remaining when paused
+  let interval = null;
+  let cycleCount = 1;         // pomodoro cycle # within a set (1..4 = work cycles)
+
+  const fmt = ms => {
+    const t = Math.max(0, Math.floor(ms/1000));
+    const m = Math.floor(t/60).toString().padStart(2,'0');
+    const s = (t%60).toString().padStart(2,'0');
+    return `${m}:${s}`;
+  };
+
+  function durationForMode(m) {
+    const n = x => Math.max(1, Math.min(600, Number(x)||0)); // clamp 1..600
+    if (m === 'work')  return n(workMins.value)  * 60 * 1000;
+    if (m === 'short') return n(shortMins.value) * 60 * 1000;
+    if (m === 'long')  return n(longMins.value)  * 60 * 1000;
+    return 25 * 60 * 1000;
+  }
+
+  function setMode(m) {
+    mode = m;
+    [...modeBtns.querySelectorAll('button')].forEach(b=>{
+      b.classList.toggle('active', b.dataset.mode === m);
+    });
+    stop();
+    remaining = durationForMode(m);
+    updateDisplay(remaining);
+    updateCycleTag();
+  }
+
+  function updateCycleTag() {
+    const label = mode === 'work' ? 'Work' : (mode === 'short' ? 'Short' : 'Long');
+    cycleTag.textContent = `${Math.min(cycleCount,4)} • ${label}`;
+  }
+
+  function start() {
+    if (running) return;
+    if (remaining <= 0) remaining = durationForMode(mode);
+    endAt = Date.now() + remaining;
+    running = true;
+    startPauseBtn.textContent = 'Pause';
+    interval = setInterval(tick, 100);
+  }
+
+  function pause() {
+    if (!running) return;
+    running = false;
+    clearInterval(interval);
+    remaining = Math.max(0, endAt - Date.now());
+    startPauseBtn.textContent = 'Start';
+    document.title = `⏸ ${fmt(remaining)} — Pomodoro`;
+  }
+
+  function stop() {
+    running = false;
+    clearInterval(interval);
+    remaining = durationForMode(mode);
+    startPauseBtn.textContent = 'Start';
+    document.title = 'Pomodoro';
+  }
+
+  function reset() {
+    stop();
+    updateDisplay(remaining);
+  }
+
+  function tick() {
+    const ms = endAt - Date.now();
+    if (ms <= 0) {
+      finishPhase();
+      return;
+    }
+    updateDisplay(ms);
+  }
+
+  function updateDisplay(ms) {
+    display.textContent = fmt(ms);
+    document.title = `${fmt(ms)} — Pomodoro`;
+  }
+
+  function finishPhase() {
+    running = false;
+    clearInterval(interval);
+    remaining = 0;
+    updateDisplay(0);
+    startPauseBtn.textContent = 'Start';
+    document.title = `✔ ${mode === 'work' ? 'Work' : 'Break'} done — Pomodoro`;
+    if (beep.checked) tinyBeep();
+    if (notify.checked) sendNote(`${capitalize(mode)} finished`, nextPhaseHint());
+
+    // Auto-cycle logic: Work → Short → Work → Short → Work → Long → (repeat)
+    if (autoCycle.checked) {
+      if (mode === 'work') {
+        cycleCount++;
+        setMode(cycleCount % 4 === 0 ? 'long' : 'short');
+      } else {
+        setMode('work');
+        if (mode === 'work' && cycleCount > 4) cycleCount = 1;
+      }
+      start(); // auto-start next phase
+    }
+  }
+
+  function nextPhaseHint() {
+    if (mode === 'work') {
+      return (cycleCount % 4 === 0) ? 'Next: Long Break' : 'Next: Short Break';
+    } else {
+      return 'Next: Work';
+    }
+  }
+
+  function sendNote(title, body) {
+    if (!('Notification' in window)) return;
+    if (Notification.permission === 'granted') {
+      new Notification(title, { body });
+    } else if (Notification.permission !== 'denied') {
+      Notification.requestPermission().then(p => {
+        if (p === 'granted') new Notification(title, { body });
+      });
+    }
+  }
+
+  function tinyBeep() {
+    try {
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = 'sine';
+      o.frequency.value = 880;
+      g.gain.setValueAtTime(0.0001, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.2, ctx.currentTime + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.2);
+      o.connect(g).connect(ctx.destination);
+      o.start();
+      o.stop(ctx.currentTime + 0.25);
+    } catch (e) {}
+  }
+
+  function capitalize(s){ return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  // UI bindings
+  startPauseBtn.addEventListener('click', () => running ? pause() : start());
+  resetBtn.addEventListener('click', reset);
+  modeBtns.addEventListener('click', (e) => {
+    const b = e.target.closest('button'); if (!b) return;
+    setMode(b.dataset.mode);
+  });
+  [workMins, shortMins, longMins].forEach(inp => inp.addEventListener('change', ()=>{
+    const wasRunning = running;
+    pause();
+    remaining = durationForMode(mode);
+    updateDisplay(remaining);
+    if (wasRunning) start();
+  }));
+
+  // Keyboard shortcuts
+  window.addEventListener('keydown', (e) => {
+    if (e.code === 'Space') { e.preventDefault(); running ? pause() : start(); }
+    if (e.key.toLowerCase() === 'r') { e.preventDefault(); reset(); }
+    if (e.key === '1') setMode('work');
+    if (e.key === '2') setMode('short');
+    if (e.key === '3') setMode('long');
+  });
+
+  // Init
+  setMode('work');
+})();
+</script>
+</body>
+</html>
+
